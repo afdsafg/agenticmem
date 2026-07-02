@@ -53,3 +53,6 @@ checkpoints/
 *.tar
 *.tar.gz
 huggingface/
+
+# Vendored upstream codebase (reference only, not tracked)
+3D-Mem/
