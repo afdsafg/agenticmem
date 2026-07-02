@@ -155,69 +155,111 @@ def load_goat_episodes(
     data_path: str,
     split: str = "val",
 ) -> List[GoatEpisode]:
-    """Load GOAT-Bench episodes from a split json.gz.
+    """Load GOAT-Bench episodes.
 
-    data_path: directory containing {split}/{split}.json.gz and {split}/content/.
+    Supports two layouts:
+    1. Merged: {data_path}/{split}/{split}.json.gz  (episodes + goals in one file)
+    2. Per-scene: {data_path}/{split}/content/{scene}.json  (each file has episodes + goals)
+
+    data_path: directory containing {split}/ subdir.
     Returns List[GoatEpisode], each with a subtasks list (filtered).
     """
     split_dir = os.path.join(data_path, split)
-    split_file = os.path.join(split_dir, f"{split}.json.gz")
-    if not os.path.exists(split_file):
-        raise FileNotFoundError(f"GOAT-Bench split file not found: {split_file}")
+    split_file_gz = os.path.join(split_dir, f"{split}.json.gz")
+    content_dir = os.path.join(split_dir, "content")
 
-    logger.info("Loading GOAT-Bench episodes from %s", split_file)
-    with gzip.open(split_file, "rt", encoding="utf-8") as f:
-        data = json.load(f)
-
-    episodes_raw = data.get("episodes", [])
-    goals = data.get("goals", {})
-    if not isinstance(goals, dict):
-        goals = {}
+    # Collect (episodes_raw, goals) pairs from one or more files
+    data_files: list = []
+    if os.path.exists(split_file_gz):
+        with gzip.open(split_file_gz, "rt", encoding="utf-8") as f:
+            data_files.append(json.load(f))
+        logger.info("Loading GOAT-Bench from %s", split_file_gz)
+    elif os.path.isdir(content_dir):
+        for fname in sorted(os.listdir(content_dir)):
+            if fname.endswith(".json"):
+                fpath = os.path.join(content_dir, fname)
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data_files.append(json.load(f))
+        logger.info("Loading GOAT-Bench from %s (%d scene files)", content_dir, len(data_files))
+    else:
+        raise FileNotFoundError(
+            f"GOAT-Bench data not found: {split_file_gz} or {content_dir}/"
+        )
 
     episodes: List[GoatEpisode] = []
-    for i, ep_raw in enumerate(episodes_raw):
-        scene_id = ep_raw["scene_id"]
-        # Strip DEFAULT_SCENE_PATH_PREFIX if present (goat_dataset.py:147-156)
-        if scene_id.startswith(DEFAULT_SCENE_PATH_PREFIX):
-            scene_id = scene_id[len(DEFAULT_SCENE_PATH_PREFIX):]
+    n_raw = 0
+    for data in data_files:
+        episodes_raw = data.get("episodes", [])
+        goals = data.get("goals", {})
+        if not isinstance(goals, dict):
+            goals = {}
+        n_raw += len(episodes_raw)
 
-        scene_base = _scene_basename(scene_id)
+        for i, ep_raw in enumerate(episodes_raw):
+            scene_id = ep_raw["scene_id"]
+            if scene_id.startswith(DEFAULT_SCENE_PATH_PREFIX):
+                scene_id = scene_id[len(DEFAULT_SCENE_PATH_PREFIX):]
 
-        subtasks: List[SubtaskGoal] = []
-        for goal_spec in ep_raw.get("tasks", []):
-            sg = _resolve_subtask_goal(goal_spec, goals, scene_base)
-            if sg is not None:
-                subtasks.append(sg)
+            scene_base = _scene_basename(scene_id)
 
-        if not subtasks:
-            continue
+            subtasks: List[SubtaskGoal] = []
+            for goal_spec in ep_raw.get("tasks", []):
+                sg = _resolve_subtask_goal(goal_spec, goals, scene_base)
+                if sg is not None:
+                    subtasks.append(sg)
 
-        episodes.append(GoatEpisode(
-            episode_id=str(ep_raw.get("episode_id", i)),
-            scene_id=scene_id,
-            start_position=list(ep_raw.get("start_position", [])),
-            start_rotation=list(ep_raw.get("start_rotation", [])),
-            subtasks=subtasks,
-        ))
+            if not subtasks:
+                continue
 
-    logger.info("Loaded %d GOAT-Bench episodes (%d raw)", len(episodes), len(episodes_raw))
+            episodes.append(GoatEpisode(
+                episode_id=str(ep_raw.get("episode_id", i)),
+                scene_id=scene_id,
+                start_position=list(ep_raw.get("start_position", [])),
+                start_rotation=list(ep_raw.get("start_rotation", [])),
+                subtasks=subtasks,
+            ))
+
+    logger.info("Loaded %d GOAT-Bench episodes (%d raw)", len(episodes), n_raw)
     return episodes
 
 
 def get_scene_path(scene_id: str, scene_data_path: str) -> str:
     """Build a habitat-sim-loadable scene path from a GOAT-Bench scene_id.
 
-    scene_id may be bare (e.g. "00800/00800.basis.glb") or already absolute.
+    scene_id formats:
+    - "hm3d/val//00877-4ok3usBNeis/4ok3usBNeis.basis.glb"
+    - "hm3d/train/00800-TEEsavR23oF/00800-TEEsavR23oF.basis.glb"
+    - "data/scene_datasets/hm3d/..."
     scene_data_path is the HM3D dataset root (e.g. /root/hm3d/).
+
+    The val/train split in scene_id may not match the actual directory layout
+    (server may have everything under train/), so we search both splits.
     """
-    # If already absolute and exists, return as-is
-    if os.path.isabs(scene_id) and os.path.exists(scene_id):
-        return scene_id
-    # Strip prefix if present
     sid = scene_id
     if sid.startswith(DEFAULT_SCENE_PATH_PREFIX):
         sid = sid[len(DEFAULT_SCENE_PATH_PREFIX):]
-    return os.path.join(scene_data_path, sid)
+
+    # Strip "hm3d/" prefix if present
+    if sid.startswith("hm3d/"):
+        sid = sid[len("hm3d/"):]
+
+    # sid now like "val//00877-4ok3usBNeis/4ok3usBNeis.basis.glb" or "train/00800-.../00800-....glb"
+    # Try direct path first
+    direct = os.path.join(scene_data_path, sid.lstrip("/"))
+    if os.path.exists(direct):
+        return direct
+
+    # The split dir (val/train) may not match actual layout — search both
+    parts = sid.lstrip("/").split("/", 1)
+    if len(parts) == 2:
+        scene_rel = parts[1].lstrip("/")  # e.g. "00877-4ok3usBNeis/4ok3usBNeis.basis.glb"
+        for split_name in ("train", "val"):
+            candidate = os.path.join(scene_data_path, split_name, scene_rel)
+            if os.path.exists(candidate):
+                return candidate
+
+    # Fallback: return best guess (may fail at load time)
+    return os.path.join(scene_data_path, sid.lstrip("/"))
 
 
 def render_image_goal(simulator, image_goal_params: Any) -> Optional[np.ndarray]:

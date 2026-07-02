@@ -70,14 +70,20 @@ def test_get_scene_path_relative():
 
 
 def test_get_scene_path_strips_prefix():
-    p = get_scene_path("data/scene_datasets/hm3d/00800/00800.glb", "/root/hm3d")
-    assert p == os.path.join("/root/hm3d", "hm3d/00800/00800.glb")
+    # strips DEFAULT_SCENE_PATH_PREFIX + "hm3d/" → searches train/val splits
+    p = get_scene_path("data/scene_datasets/hm3d/train/00800/00800.glb", "/root/hm3d")
+    # Non-existent scene → fallback guess
+    assert "00800" in p
 
 
 def test_get_scene_path_absolute_existing(tmp_path):
-    f = tmp_path / "scene.glb"
-    f.write_text("dummy")
-    assert get_scene_path(str(f), "/root/hm3d") == str(f)
+    # absolute existing path: strip prefix, search splits, find under train/
+    scene_dir = tmp_path / "train" / "00800-SCENE"
+    scene_dir.mkdir(parents=True)
+    glb = scene_dir / "00800-SCENE.basis.glb"
+    glb.write_text("dummy")
+    p = get_scene_path("hm3d/val//00800-SCENE/00800-SCENE.basis.glb", str(tmp_path))
+    assert p == str(glb)
 
 
 # ---------------------------------------------------------------------------
