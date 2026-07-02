@@ -339,10 +339,10 @@ def merge_obj2_into_obj1(
     tracker.track_merge(obj1, obj2)
 
     # Attributes to be explicitly handled
-    extend_attributes = ["class_id"]
+    extend_attributes = ["class_id", 'image_path_list']
     add_attributes = ["num_detections"]
     skip_attributes = ["id", "class_name"]  # 'inst_color' just keeps obj1's
-    custom_handled = ["pcd", "bbox", "clip_ft", "conf", "image", "image_crop"]
+    custom_handled = ["pcd", "bbox", "clip_ft", "conf", "image", "image_crop", 'image_path', 'mask_num', 'room_label', 'room_conf']
 
     # Check for unhandled keys and throw an error if there are
     all_handled_keys = set(
@@ -405,6 +405,15 @@ def merge_obj2_into_obj1(
 
     # Update confidence by taking the maximum
     obj1["conf"] = max(obj1["conf"], obj2["conf"])
+    obj1["room_label"] = obj1["room_label"] if obj1.get("room_conf", 0) > obj2.get("room_conf", 0) else obj2.get("room_label", obj1["room_label"])
+    obj1["room_conf"] = max(obj1.get("room_conf", 0), obj2.get("room_conf", 0))
+    if "mask_num" in obj1.keys():
+        if obj1["mask_num"] > obj2.get("mask_num", 0):
+            obj1["image_path"] = obj1["image_path"]
+            obj1["mask_num"] = obj1["mask_num"]
+        else:
+            obj1["image_path"] = obj2["image_path"]
+            obj1["mask_num"] = obj2["mask_num"]
 
     # merge text_ft
     # obj2['text_ft'] = to_tensor(obj2['text_ft'], device)

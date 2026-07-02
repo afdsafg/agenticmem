@@ -20,8 +20,10 @@ import time
 import json
 import logging
 import matplotlib.pyplot as plt
-import habitat_sim 
+import habitat_sim
 
+import open_clip
+from ultralytics import SAM, YOLOWorld
 
 from src.habitat import pose_habitat_to_tsdf
 from src.geom import get_cam_intr, get_scene_bnds
@@ -47,6 +49,17 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
 
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
+
+    # load detection and segmentation models
+    detection_model = YOLOWorld(cfg.yolo_model_name)
+    logging.info(f"Load YOLO model {cfg.yolo_model_name} successful!")
+    sam_predictor = SAM(cfg.sam_model_name)
+    logging.info(f"Load SAM model {cfg.sam_model_name} successful!")
+    clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
+        "ViT-B-32", "laion2b_s34b_b79k"
+    )
+    clip_tokenizer = open_clip.get_tokenizer("ViT-B-32")
+    logging.info(f"Load CLIP model successful!")
 
     # Load dataset
     questions_list = json.load(open(cfg.questions_list_path, "r"))
@@ -110,6 +123,11 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
             scene_id,
             cfg,
             cfg_cg,
+            detection_model=detection_model,
+            sam_predictor=sam_predictor,
+            clip_model=clip_model,
+            clip_preprocess=clip_preprocess,
+            clip_tokenizer=clip_tokenizer,
         )
 
         # initialize the TSDF
@@ -162,25 +180,28 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
                 all_angles.append(main_angle)
 
                 rgb_egocentric_views = []  # TODO
-                all_added_obj_ids = []  # No object IDs in simplified approach
+                all_added_obj_ids = []
                 for view_idx, ang in enumerate(all_angles):
                     # For each view
                     obs, cam_pose = scene.get_observation(pts, ang)
                     rgb = obs["color_sensor"]
                     depth = obs["depth_sensor"]
 
-                    obs_file_name = f"{cnt_step}-view_{view_idx}.png"            
-                    scene.all_observations[obs_file_name] = rgb[..., :3]
-                    
-                    # Create a simple frame for this observation
-                    from src.tsdf_planner import SnapShot
-                    frame = SnapShot(
-                        image=obs_file_name,
-                        color=(random.random(), random.random(), random.random()),
-                        obs_point=tsdf_planner.habitat2voxel(pts),
+                    obs_file_name = f"{cnt_step}-view_{view_idx}.png"
+
+                    # update_scene_graph runs detection stack (if enabled) + stores VLM observations
+                    _, added_obj_ids, _ = scene.update_scene_graph(
+                        image_rgb=rgb[..., :3],
+                        depth=depth,
+                        intrinsics=cam_intr,
+                        cam_pos=cam_pose,
+                        pts=pts,
+                        pts_voxel=tsdf_planner.habitat2voxel(pts),
+                        img_path=obs_file_name,
+                        frame_idx=cnt_step * total_views + view_idx,
                     )
-                    scene.frames[obs_file_name] = frame
-                    
+                    all_added_obj_ids.extend(added_obj_ids)
+
                     resized_rgb = resize_image(rgb, cfg.prompt_h, cfg.prompt_w)
                     rgb_egocentric_views.append(resized_rgb)
 

@@ -12,6 +12,12 @@ questions_list_path: '/.../Pred-EQA/data/aeqa_questions-41.json'   # AEQA subset
 choose_every_step: true # true  # whether to query vlm at each step, or only after arriving at the navigation target
 egocentric_views: true  # whether to add egocentric views when prompting vlm
 
+# detection model (MSGNav-style detection stack, runs in parallel with VLM)
+yolo_model_name: yolov8x-world.pt
+sam_model_name: sam_l.pt
+class_set: scannet200
+min_detection: 1
+
 # camera, image
 camera_height: 1.5
 camera_tilt_deg: -30

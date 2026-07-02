@@ -39,6 +39,11 @@ class Scene:
         scene_id,
         cfg,
         graph_cfg,
+        detection_model=None,
+        sam_predictor=None,
+        clip_model=None,
+        clip_preprocess=None,
+        clip_tokenizer=None,
     ):
         self.cfg = cfg
         # concept graph configuration
@@ -102,8 +107,24 @@ class Scene:
         self.pathfinder.seed(cfg.seed)
         self.pathfinder.load_nav_mesh(navmesh_path)
 
-        # Object detection module deprecated for the simplified VLM-only approach,
-        # so we no longer load object classes here.
+        # Object detection module - optional detection stack (MSGNav-style)
+        # If detection_model provided, runs YOLO+SAM+CLIP in parallel with VLM
+        self.detection_model = detection_model
+        self.sam_predictor = sam_predictor
+        self.clip_model = clip_model
+        self.clip_preprocess = clip_preprocess
+        self.clip_tokenizer = clip_tokenizer
+        self.obj_classes = None
+        if detection_model is not None and os.path.exists(scene_semantic_annotation_path):
+            from src.conceptgraph.utils.general_utils import ObjectClasses
+            self.obj_classes = ObjectClasses(
+                classes_file_path=scene_semantic_annotation_path,
+                bg_classes=self.cfg_cg["bg_classes"],
+                skip_bg=self.cfg_cg["skip_bg"],
+                class_set=cfg.class_set,
+            )
+            self.detection_model.set_classes(self.obj_classes.get_classes_arr())
+            logging.info(f"Detection stack enabled: {len(self.obj_classes.get_classes_arr())} classes loaded")
 
         if os.path.exists(semantic_texture_path) and os.path.exists(
             scene_semantic_annotation_path
@@ -249,7 +270,7 @@ class Scene:
             prev_start_positions,
         )
 
-    def update_scene_graph_with_vlm(
+    def update_scene_graph(
         self,
         image_rgb: np.ndarray,
         depth: np.ndarray,
@@ -259,32 +280,267 @@ class Scene:
         pts_voxel,
         img_path,
         frame_idx,
-        target_obj_mask=None,  # the boolean mask of target object generated from the semantic sensor. If given, return the object id of the target object
-        vlm_model=None,  # Pure VLM model for scene understanding
+        target_obj_mask=None,
+        vlm_model=None,
         vlm_processor=None,
     ) -> Tuple[np.ndarray, List[int], Optional[int]]:
+        """Update scene graph. Two parallel paths:
+        1. Detection stack (if models loaded): YOLO+SAM+CLIP → self.objects with image_path
+        2. VLM path (always): store raw image in all_observations + frames for snapshot
+        Snapshot generation is NOT affected by detection stack.
         """
-        Simplified approach: Store the image directly and pass to VLM without any preprocessing
-        """
-        # Return the original image; no object IDs since we're not doing detection
         added_obj_ids = []
-        
-        # Create a frame for this observation
+
+        # --- Detection stack path (parallel, does not touch snapshots) ---
+        if self.detection_model is not None and self.obj_classes is not None:
+            try:
+                added_obj_ids = self._run_detection_stack(
+                    image_rgb, depth, intrinsics, cam_pos, pts, img_path
+                )
+            except Exception as e:
+                logging.warning(f"Detection stack failed (non-fatal, VLM path continues): {e}")
+                added_obj_ids = []
+
+        # --- VLM path (always runs, untouched from original) ---
         frame = SnapShot(
             image=img_path,
             color=(random.random(), random.random(), random.random()),
             obs_point=pts_voxel,
         )
-        
-        # Simply store the raw image for VLM processing
         self.all_observations[img_path] = image_rgb
         self.frames[img_path] = frame
-        
-        # No complex processing - just pass image directly to VLM
-        # In a real implementation, the VLM would be called here or later during decision making
-        target_obj_id = None  # We don't detect specific objects anymore
-            
+
+        target_obj_id = None
         return image_rgb, added_obj_ids, target_obj_id
+
+    def _run_detection_stack(
+        self, image_rgb, depth, intrinsics, cam_pos, pts, img_path
+    ) -> List[int]:
+        """MSGNav-style detection stack. Fills self.objects with image_path tracking.
+        Does NOT touch self.snapshots or self.frames."""
+        import supervision as sv
+        from src.conceptgraph.utils.ious import mask_subtract_contained
+        from src.conceptgraph.utils.general_utils import filter_detections
+        from src.conceptgraph.utils.model_utils import compute_clip_features_batched
+        from src.conceptgraph.slam.utils import (
+            resize_gobs, filter_gobs, init_process_pcd, get_bounding_box,
+            detections_to_obj_pcd_and_bbox,
+        )
+        from src.conceptgraph.utils.general_utils import measure_time
+        from src.conceptgraph.slam.mapping import (
+            compute_spatial_similarities, compute_visual_similarities,
+            aggregate_similarities, match_detections_to_objects,
+        )
+
+        obj_classes = self.obj_classes
+        cfg_cg = self.cfg_cg
+
+        # 1. YOLO detection
+        results = self.detection_model.predict(image_rgb, conf=0.1, verbose=False)
+        confidences = results[0].boxes.conf.cpu().numpy()
+        detection_class_ids = results[0].boxes.cls.cpu().numpy().astype(int)
+        detection_class_labels = [
+            f"{obj_classes.get_classes_arr()[class_id]} {class_idx}"
+            for class_idx, class_id in enumerate(detection_class_ids)
+        ]
+        xyxy_tensor = results[0].boxes.xyxy
+        xyxy_np = xyxy_tensor.cpu().numpy()
+
+        # 2. SAM segmentation
+        if xyxy_tensor.numel() != 0:
+            sam_out = self.sam_predictor.predict(image_rgb, bboxes=xyxy_tensor, verbose=False)
+            masks_np = sam_out[0].masks.data.cpu().numpy()
+        else:
+            masks_np = np.empty((0, *image_rgb.shape[:2]), dtype=np.float64)
+
+        curr_det = sv.Detections(
+            xyxy=xyxy_np, confidence=confidences,
+            class_id=detection_class_ids, mask=masks_np,
+        )
+        if len(curr_det) == 0:
+            return []
+
+        # 3. filter detections
+        curr_det, labels = filter_detections(
+            image=image_rgb, detections=curr_det, classes=obj_classes,
+            given_labels=detection_class_labels,
+            iou_threshold=cfg_cg.object_detection_iou_threshold,
+            min_mask_size_ratio=cfg_cg.min_mask_size_ratio,
+            confidence_threshold=cfg_cg.object_detection_confidence_threshold,
+        )
+        if curr_det is None:
+            return []
+
+        # 4. CLIP features
+        image_crops, image_feats, text_feats = compute_clip_features_batched(
+            image_rgb, curr_det, self.clip_model, self.clip_preprocess,
+            self.clip_tokenizer, obj_classes.get_classes_arr(), self.device,
+        )
+
+        raw_gobs = {
+            "xyxy": curr_det.xyxy, "confidence": curr_det.confidence,
+            "class_id": curr_det.class_id, "mask": curr_det.mask,
+            "classes": obj_classes.get_classes_arr(),
+            "image_crops": image_crops, "image_feats": image_feats,
+            "text_feats": text_feats,
+            "detection_class_labels": detection_class_labels,
+            "room_label": "unknown", "room_conf": 0.0,
+        }
+
+        # 5. resize + filter gobs
+        resized_gobs = resize_gobs(raw_gobs, image_rgb)
+        filtered_gobs = filter_gobs(
+            resized_gobs, image_rgb,
+            skip_bg=cfg_cg["skip_bg"],
+            BG_CLASSES=obj_classes.get_bg_classes_arr(),
+            mask_area_threshold=cfg_cg.mask_area_threshold,
+            max_bbox_area_ratio=cfg_cg.max_bbox_area_ratio,
+            mask_conf_threshold=cfg_cg.mask_conf_threshold,
+        )
+        gobs = filtered_gobs
+        if len(gobs["mask"]) == 0:
+            return []
+
+        # 6. mask subtract + point cloud backprojection
+        gobs["mask"] = mask_subtract_contained(gobs["xyxy"], gobs["mask"])
+        obj_pcds_and_bboxes = measure_time(detections_to_obj_pcd_and_bbox)(
+            depth_array=depth, masks=gobs["mask"], cam_K=intrinsics[:3, :3],
+            image_rgb=image_rgb, trans_pose=cam_pos,
+            min_points_threshold=cfg_cg.min_points_threshold,
+            spatial_sim_type=cfg_cg["spatial_sim_type"],
+            obj_pcd_max_points=cfg_cg.obj_pcd_max_points, device=self.device,
+        )
+        for obj in obj_pcds_and_bboxes:
+            if obj:
+                obj["pcd"] = init_process_pcd(
+                    pcd=obj["pcd"],
+                    downsample_voxel_size=cfg_cg["downsample_voxel_size"],
+                    dbscan_remove_noise=cfg_cg["dbscan_remove_noise"],
+                    dbscan_eps=cfg_cg["dbscan_eps"],
+                    dbscan_min_points=cfg_cg["dbscan_min_points"],
+                )
+                obj["bbox"] = get_bounding_box(
+                    spatial_sim_type=cfg_cg["spatial_sim_type"], pcd=obj["pcd"],
+                )
+
+        if all([obj is None for obj in obj_pcds_and_bboxes]):
+            return []
+
+        gobs["bbox"] = [obj["bbox"] if obj is not None else None for obj in obj_pcds_and_bboxes]
+        gobs["pcd"] = [obj["pcd"] if obj is not None else None for obj in obj_pcds_and_bboxes]
+
+        # 7. filter by distance
+        gobs = self.filter_gobs_with_distance(pts, gobs)
+
+        # 8. make detection list (with image_path / image_path_list)
+        detection_list = self.make_detection_list_from_pcd_and_gobs(gobs, img_path, obj_classes)
+        if len(detection_list) == 0:
+            return []
+
+        # 9. match + merge (or add all if first frame)
+        if len(self.objects) == 0:
+            self.objects.update(detection_list)
+            added_obj_ids = list(detection_list.keys())
+        else:
+            spatial_sim = compute_spatial_similarities(
+                spatial_sim_type=cfg_cg["spatial_sim_type"],
+                detection_list=detection_list, objects=self.objects,
+                downsample_voxel_size=cfg_cg["downsample_voxel_size"],
+            )
+            visual_sim = compute_visual_similarities(detection_list, self.objects)
+            agg_sim = aggregate_similarities(
+                match_method=cfg_cg["match_method"], phys_bias=cfg_cg["phys_bias"],
+                spatial_sim=spatial_sim, visual_sim=visual_sim,
+            )
+            match_indices = match_detections_to_objects(
+                agg_sim=agg_sim, detection_threshold=cfg_cg["sim_threshold"],
+                existing_obj_ids=list(self.objects.keys()),
+                detected_obj_ids=list(detection_list.keys()),
+            )
+            added_obj_ids = self.merge_obj_matches(
+                detection_list=detection_list, match_indices=match_indices,
+                obj_classes=obj_classes,
+            )
+
+        return added_obj_ids
+
+    def filter_gobs_with_distance(self, pts, gobs):
+        """Filter out objects too far from observation point. (From MSGNav)"""
+        idx_to_keep = []
+        for idx in range(len(gobs["bbox"])):
+            if gobs["bbox"][idx] is None:
+                continue
+            if np.linalg.norm(gobs["bbox"][idx].center[[0, 2]] - pts[[0, 2]]) > self.cfg.scene_graph.obj_include_dist:
+                continue
+            idx_to_keep.append(idx)
+        for attribute in gobs.keys():
+            if isinstance(gobs[attribute], str) or isinstance(gobs[attribute], float) or attribute == "classes":
+                continue
+            if attribute in ["labels", "edges", "text_feats", "captions"]:
+                continue
+            elif isinstance(gobs[attribute], list):
+                gobs[attribute] = [gobs[attribute][i] for i in idx_to_keep]
+            elif isinstance(gobs[attribute], np.ndarray):
+                gobs[attribute] = gobs[attribute][idx_to_keep]
+            else:
+                raise NotImplementedError(f"Unhandled type {type(gobs[attribute])}")
+        return gobs
+
+    def make_detection_list_from_pcd_and_gobs(self, gobs, image_path, obj_classes):
+        """Build detection list with image_path / image_path_list tracking. (From MSGNav)"""
+        from src.conceptgraph.slam.slam_classes import DetectionDict, to_tensor
+        detection_list = DetectionDict()
+        for mask_idx in range(len(gobs["mask"])):
+            if gobs["pcd"][mask_idx] is None:
+                continue
+            curr_class_name = gobs["classes"][gobs["class_id"][mask_idx]]
+            curr_class_idx = obj_classes.get_classes_arr().index(curr_class_name)
+            detected_object = {
+                "id": self.object_id_counter,
+                "class_name": curr_class_name,
+                "class_id": [curr_class_idx],
+                "num_detections": 1,
+                "conf": gobs["confidence"][mask_idx],
+                "pcd": gobs["pcd"][mask_idx],
+                "bbox": gobs["bbox"][mask_idx],
+                "mask_num": gobs["mask"][mask_idx].sum(),
+                "clip_ft": to_tensor(gobs["image_feats"][mask_idx]),
+                "image": None,
+                "room_label": gobs["room_label"],
+                "room_conf": gobs["room_conf"],
+                "image_path": image_path,
+                "image_path_list": [image_path],
+            }
+            detection_list[self.object_id_counter] = detected_object
+            self.object_id_counter += 1
+        return detection_list
+
+    def merge_obj_matches(self, detection_list, match_indices, obj_classes):
+        """Merge detected objects into existing objects. (Simplified from MSGNav)"""
+        from src.conceptgraph.slam.utils import merge_obj2_into_obj1
+        from collections import Counter
+        added_obj_ids = []
+        for idx, (detected_obj_id, existing_obj_match_id) in enumerate(match_indices):
+            if existing_obj_match_id is None:
+                self.objects[detected_obj_id] = detection_list[detected_obj_id]
+                added_obj_ids.append(detected_obj_id)
+            else:
+                detected_obj = detection_list[detected_obj_id]
+                matched_obj = self.objects[existing_obj_match_id]
+                merged_obj = merge_obj2_into_obj1(
+                    obj1=matched_obj, obj2=detected_obj,
+                    downsample_voxel_size=self.cfg_cg["downsample_voxel_size"],
+                    dbscan_remove_noise=self.cfg_cg["dbscan_remove_noise"],
+                    dbscan_eps=self.cfg_cg["dbscan_eps"],
+                    dbscan_min_points=self.cfg_cg["dbscan_min_points"],
+                    spatial_sim_type=self.cfg_cg["spatial_sim_type"],
+                    device=self.device, run_dbscan=False,
+                )
+                class_id_counter = Counter(merged_obj["class_id"])
+                most_common_class_id = class_id_counter.most_common(1)[0][0]
+                merged_obj["class_name"] = obj_classes.get_classes_arr()[most_common_class_id]
+                self.objects[existing_obj_match_id] = merged_obj
+        return added_obj_ids
 
     def cleanup_empty_frames_snapshots(self):
         """
