@@ -21,8 +21,6 @@ import json
 import logging
 import matplotlib.pyplot as plt
 
-import open_clip
-from ultralytics import SAM, YOLOWorld
 
 from src.habitat import pose_habitat_to_tsdf
 from src.geom import get_cam_intr, get_scene_bnds
@@ -38,7 +36,7 @@ import base64
 import torch
 
 def main(cfg, start_ratio=0.0, end_ratio=1.0):
-    # load the default concept graph config (cfg path already resolved in __main__)
+    # load the default concept graph config
     cfg_cg = OmegaConf.load(cfg.concept_graph_config_path)
     OmegaConf.resolve(cfg_cg)
 
@@ -62,18 +60,6 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
     logging.info(f"number of questions after splitting: {len(questions_list)}")
     logging.info(f"question path: {cfg.questions_list_path}")
 
-    # load detection and segmentation models
-    detection_model = YOLOWorld(cfg.yolo_model_name)
-    logging.info(f"Load YOLO model {cfg.yolo_model_name} successful!")
-
-    sam_predictor = SAM(cfg.sam_model_name)  # UltraLytics SAM
-    logging.info(f"Load SAM model {cfg.sam_model_name} successful!")
-
-    clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
-        "ViT-B-32", "laion2b_s34b_b79k"  # "ViT-H-14", "laion2b_s32b_b79k"
-    )
-    clip_tokenizer = open_clip.get_tokenizer("ViT-B-32")
-    logging.info(f"Load CLIP model successful!")
 
     # Initialize the logger
     logger = Logger(
@@ -111,11 +97,6 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
             scene_id,
             cfg,
             cfg_cg,
-            detection_model,
-            sam_predictor,
-            clip_model,
-            clip_preprocess,
-            clip_tokenizer,
         )
 
         # initialize the TSDF
@@ -166,10 +147,8 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
                 main_angle = all_angles.pop(total_views // 2)
                 all_angles.append(main_angle)
 
-                rgb_egocentric_views = []
-                all_added_obj_ids = (
-                    []
-                )  # Record all the objects that are newly added in this step
+                rgb_egocentric_views = []  # TODO
+                all_added_obj_ids = []  # No object IDs in simplified approach
                 for view_idx, ang in enumerate(all_angles):
                     # For each view
                     obs, cam_pose = scene.get_observation(pts, ang)
@@ -177,31 +156,26 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
                     depth = obs["depth_sensor"]
 
                     obs_file_name = f"{cnt_step}-view_{view_idx}.png"
-                    with torch.no_grad():
-                        # Concept graph pipeline update (YOLO+SAM+CLIP detection stack)
-                        annotated_rgb, added_obj_ids, _ = scene.update_scene_graph(
-                            image_rgb=rgb[..., :3],
-                            depth=depth,
-                            intrinsics=cam_intr,
-                            cam_pos=cam_pose,
-                            pts=pts,
-                            pts_voxel=tsdf_planner.habitat2voxel(pts),
-                            img_path=obs_file_name,
-                            frame_idx=cnt_step * total_views + view_idx,
-                            target_obj_mask=None,
-                        )
-                        scene.all_observations[obs_file_name] = rgb[..., :3]
-                        resized_rgb = resize_image(rgb, cfg.prompt_h, cfg.prompt_w)
-                        rgb_egocentric_views.append(resized_rgb)
-                        if cfg.save_visualization:
-                            plt.imsave(
-                                os.path.join(eps_snapshot_dir, obs_file_name), annotated_rgb
-                            )
-                        else:
-                            plt.imsave(os.path.join(eps_snapshot_dir, obs_file_name), rgb)
-                        all_added_obj_ids += added_obj_ids
+                    scene.all_observations[obs_file_name] = rgb[..., :3]
+                    
+                    from src.tsdf_planner import SnapShot
+                    frame = SnapShot(
+                        image=obs_file_name,
+                        color=(random.random(), random.random(), random.random()),
+                        obs_point=tsdf_planner.habitat2voxel(pts),
+                    )
+                    scene.frames[obs_file_name] = frame
+                    
+                    resized_rgb = resize_image(rgb, cfg.prompt_h, cfg.prompt_w)
+                    rgb_egocentric_views.append(resized_rgb)
 
-                    # Clean up or merge redundant objects periodically
+                    if cfg.save_visualization:
+                        plt.imsave(
+                            os.path.join(eps_snapshot_dir, obs_file_name), rgb
+                        )
+                    else:
+                        plt.imsave(os.path.join(eps_snapshot_dir, obs_file_name), rgb)
+
                     scene.periodic_cleanup_objects(
                         frame_idx=cnt_step * total_views + view_idx, pts=pts
                     )
@@ -218,22 +192,10 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
                         explored_depth=cfg.explored_depth,
                     )
 
-                # (2) Update Memory Snapshots with hierarchical clustering
-                # Choose all the newly added objects as well as the objects nearby as the cluster targets
-                all_added_obj_ids = [
-                    obj_id for obj_id in all_added_obj_ids if obj_id in scene.objects
-                ]
-                for obj_id, obj in scene.objects.items():
-                    if (
-                        np.linalg.norm(obj["bbox"].center[[0, 2]] - pts[[0, 2]])
-                        < cfg.scene_graph.obj_include_dist + 0.5
-                    ):
-                        all_added_obj_ids.append(obj_id)
-                scene.update_snapshots(
-                    obj_ids=set(all_added_obj_ids), min_detection=cfg.min_detection
-                )
+                # (2) Update Memory Snapshots - add new frames to snapshots for VLM evaluation
+                scene.update_snapshots()
                 logging.info(
-                    f"Step {cnt_step}, update snapshots, {len(scene.objects)} objects, {len(scene.snapshots)} snapshots"
+                    f"Step {cnt_step}, current snapshots count: {len(scene.snapshots)} snapshots"
                 )
 
                 # (3) Update the Frontier Snapshots

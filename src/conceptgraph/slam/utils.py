@@ -339,7 +339,7 @@ def merge_obj2_into_obj1(
     tracker.track_merge(obj1, obj2)
 
     # Attributes to be explicitly handled
-    extend_attributes = ["class_id", "image_path_list"]
+    extend_attributes = ["class_id"]
     add_attributes = ["num_detections"]
     skip_attributes = ["id", "class_name"]  # 'inst_color' just keeps obj1's
     custom_handled = ["pcd", "bbox", "clip_ft", "conf", "image", "image_crop"]
@@ -362,11 +362,6 @@ def merge_obj2_into_obj1(
     for attr in extend_attributes:
         if attr in obj1 and attr in obj2:
             obj1[attr].extend(obj2[attr])
-
-    # deduplicate image_path_list while preserving order
-    if "image_path_list" in obj1:
-        seen = set()
-        obj1["image_path_list"] = [x for x in obj1["image_path_list"] if not (x in seen or seen.add(x))]
 
     for attr in add_attributes:
         if attr in obj1 and attr in obj2:
