@@ -39,7 +39,11 @@ import torch
 
 def main(cfg, start_ratio=0.0, end_ratio=1.0):
     # load the default concept graph config
-    cfg_cg = OmegaConf.load(cfg.concept_graph_config_path)
+    # resolve placeholder "/.../" in config path to project root (script dir)
+    cg_path = cfg.concept_graph_config_path.replace(
+        "/.../", os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/"
+    )
+    cfg_cg = OmegaConf.load(cg_path)
     OmegaConf.resolve(cfg_cg)
 
     img_height = cfg.img_height
