@@ -767,6 +767,8 @@ class Scene:
                 "clip_ft": to_tensor(gobs["image_feats"][mask_idx]),
                 # the snapshot name it belongs to
                 "image": None,
+                # all frames this object has been seen in (for orphan recovery)
+                "image_path_list": [image_path],
             }
 
             detection_list[self.object_id_counter] = detected_object
@@ -996,6 +998,41 @@ class Scene:
                 snap_to_pop.append(filename)
         for filename in snap_to_pop:
             self.snapshots.pop(filename)
+
+        # Reassign orphan objects (in self.objects with num_detections >= min_detection
+        # but not in any snapshot.cluster) back to a snapshot using image_path_list.
+        clustered_objs = set()
+        for ss in self.snapshots.values():
+            clustered_objs.update(ss.cluster)
+        orphans = [
+            oid for oid in self.objects
+            if oid not in clustered_objs
+            and self.objects[oid]["num_detections"] >= self.cfg.min_detection
+        ]
+        for oid in orphans:
+            img = None
+            # find a frame still in self.frames that observed this object
+            for path in self.objects[oid].get("image_path_list", []):
+                if path in self.frames:
+                    img = path
+                    break
+            if img is None:
+                # frame was cleaned up; rebuild from all_observations if available
+                for path in self.objects[oid].get("image_path_list", []):
+                    if path in self.all_observations:
+                        self.frames[path] = SnapShot(
+                            image=path,
+                            color=(random.random(), random.random(), random.random()),
+                            obs_point=self.objects[oid]["bbox"].center,
+                        )
+                        img = path
+                        break
+            if img is not None:
+                if img not in self.snapshots:
+                    self.snapshots[img] = self.frames[img]
+                self.snapshots[img].cluster.append(oid)
+                self.snapshots[img].full_obj_list[oid] = self.objects[oid]["conf"]
+                self.objects[oid]["image"] = img
 
     def sanity_check(self, cfg):
         """
