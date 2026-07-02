@@ -57,6 +57,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
     clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
         "ViT-B-32", "laion2b_s34b_b79k"
     )
+    clip_model = clip_model.to("cuda")
     clip_tokenizer = open_clip.get_tokenizer("ViT-B-32")
     logging.info(f"Load CLIP model successful!")
 
