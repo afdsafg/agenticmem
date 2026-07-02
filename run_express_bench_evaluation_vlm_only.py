@@ -474,6 +474,11 @@ if __name__ == "__main__":
     for _k in cfg:
         if isinstance(cfg[_k], str) and _placeholder in cfg[_k]:
             cfg[_k] = cfg[_k].replace(_placeholder, _replacement)
+    # resolve hm3d dataset path placeholder
+    _hm3d_root = os.environ.get("HM3D_DATA_PATH", "/root")
+    for _k in cfg:
+        if isinstance(cfg[_k], str) and "/path-to-your-hm3d-dataset/" in cfg[_k]:
+            cfg[_k] = cfg[_k].replace("/path-to-your-hm3d-dataset/", _hm3d_root + "/")
 
     # Set up logging
     cfg.output_dir = os.path.join(cfg.output_parent_dir, cfg.exp_name)
