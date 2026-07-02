@@ -403,7 +403,11 @@ def main(cfg, start_ratio: float = 0.0, end_ratio: float = 1.0):
 
     for episode in episodes:
         logger.info("\n========\nEpisode %s scene=%s", episode.episode_id, episode.scene_id)
-        scene_path = get_scene_path(episode.scene_id, cfg.scene_data_path)
+        # Scene.__init__ expects short scene_id like "00877-4ok3usBNeis"
+        # episode.scene_id is "hm3d/val//00877-4ok3usBNeis/4ok3usBNeis.basis.glb"
+        scene_basename = os.path.basename(episode.scene_id)  # 4ok3usBNeis.basis.glb
+        scene_dir = os.path.basename(os.path.dirname(episode.scene_id))  # 00877-4ok3usBNeis
+        short_scene_id = scene_dir  # "00877-4ok3usBNeis"
 
         pts, angle = get_pts_angle_aeqa(
             episode.start_position, episode.start_rotation
@@ -417,7 +421,7 @@ def main(cfg, start_ratio: float = 0.0, end_ratio: float = 1.0):
             pass
 
         scene = Scene(
-            scene_path,
+            short_scene_id,
             cfg,
             cfg_cg,
             detection_model=detection_model,
