@@ -38,12 +38,8 @@ import base64
 import torch
 
 def main(cfg, start_ratio=0.0, end_ratio=1.0):
-    # load the default concept graph config
-    # resolve placeholder "/.../" in config path to project root (script dir)
-    cg_path = cfg.concept_graph_config_path.replace(
-        "/.../", os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/"
-    )
-    cfg_cg = OmegaConf.load(cg_path)
+    # load the default concept graph config (cfg path already resolved in __main__)
+    cfg_cg = OmegaConf.load(cfg.concept_graph_config_path)
     OmegaConf.resolve(cfg_cg)
 
     img_height = cfg.img_height
@@ -427,8 +423,18 @@ if __name__ == "__main__":
     parser.add_argument("--end_ratio", help="end ratio", default=1.0, type=float)
     parser.add_argument("--qwen", help="qwen version", default="Qwen2.5-VL-3B-Instruct", type=str)
     args = parser.parse_args()
+    # resolve placeholder "/.../" in cfg path to project root (script dir's parent)
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if args.cfg_file.startswith("/.../"):
+        args.cfg_file = args.cfg_file.replace("/.../", _project_root + "/", 1)
     cfg = OmegaConf.load(args.cfg_file)
     OmegaConf.resolve(cfg)
+    # resolve any remaining "/.../" placeholders in cfg string values
+    _placeholder = "/.../"
+    _replacement = _project_root + "/"
+    for _k in cfg:
+        if isinstance(cfg[_k], str) and _placeholder in cfg[_k]:
+            cfg[_k] = cfg[_k].replace(_placeholder, _replacement)
 
     # Set up logging
     cfg.output_dir = os.path.join(cfg.output_parent_dir, cfg.exp_name)
