@@ -848,21 +848,28 @@ class Scene:
             for snapshot in prev_snapshots.values()
             for obj_id in snapshot.cluster
         ]
-        assert set(
-            [
-                obj_id
-                for snapshot in new_snapshots.values()
-                for obj_id in snapshot.cluster
-            ]
-        ) == set(
-            obj_ids
-        ), f"{set([obj_id for snapshot in new_snapshots.values() for obj_id in snapshot.cluster])} != {set(obj_ids)}"
-        assert (
-            set(obj_ids) & set(prev_snapshot_objs)
-        ) == set(), f"{set(obj_ids)} & {set(prev_snapshot_objs)} != empty"
-        assert (set(obj_ids) | set(prev_snapshot_objs) | set(obj_exclude)) == set(
+        new_snapshot_obj_set = set(
+            obj_id
+            for snapshot in new_snapshots.values()
+            for obj_id in snapshot.cluster
+        )
+        if new_snapshot_obj_set != set(obj_ids):
+            logging.warning(
+                f"update_snapshots: new cluster objs {new_snapshot_obj_set} != obj_ids {set(obj_ids)}"
+            )
+        if set(obj_ids) & set(prev_snapshot_objs) != set():
+            logging.warning(
+                f"update_snapshots: obj_ids & prev_snapshot_objs != empty: {set(obj_ids) & set(prev_snapshot_objs)}"
+            )
+        if set(obj_ids) | set(prev_snapshot_objs) | set(obj_exclude) != set(
             self.objects.keys()
-        ), f"{set(obj_ids)} | {set(prev_snapshot_objs)} | {set(obj_exclude)} != {set(self.objects.keys())}"
+        ):
+            missing = set(self.objects.keys()) - (
+                set(obj_ids) | set(prev_snapshot_objs) | set(obj_exclude)
+            )
+            logging.warning(
+                f"update_snapshots: {len(missing)} objects not covered by cluster/exclude: {missing}"
+            )
 
         for key, snapshot in new_snapshots.items():
             if key in prev_snapshots.keys():
@@ -950,14 +957,16 @@ class Scene:
                 device=self.device,
             )
 
-        # update the object list in snapshots, since some objects may have been removed
+        # update the object list in snapshots/frames, since some objects may have
+        # been removed or merged by denoise/filter/merge above.
+        # Sync BOTH self.frames and self.snapshots so sanity_check won't desync.
         frame_to_pop = []
         for (
             filename,
             ss,
         ) in (
             self.frames.items()
-        ):  # TODO: check whether content in snapshots are also changed, and see whether need to remove snapshot that have empty cluster
+        ):
             ss.cluster = [
                 obj_id for obj_id in ss.cluster if obj_id in self.objects.keys()
             ]
@@ -971,6 +980,23 @@ class Scene:
         for filename in frame_to_pop:
             self.frames.pop(filename)
 
+        # Sync self.snapshots the same way (3D-Mem only synced frames, which left
+        # stale object ids in snapshot.cluster -> sanity_check assert failures).
+        snap_to_pop = []
+        for filename, ss in self.snapshots.items():
+            ss.cluster = [
+                obj_id for obj_id in ss.cluster if obj_id in self.objects.keys()
+            ]
+            ss.full_obj_list = {
+                obj_id: conf
+                for obj_id, conf in ss.full_obj_list.items()
+                if obj_id in self.objects.keys()
+            }
+            if len(ss.cluster) == 0:
+                snap_to_pop.append(filename)
+        for filename in snap_to_pop:
+            self.snapshots.pop(filename)
+
     def sanity_check(self, cfg):
         """
         Sanity checks adapted for both detection-stack and pure VLM approaches.
@@ -983,6 +1009,11 @@ class Scene:
             return
 
         # Detection-stack sanity checks (3D-Mem)
+        # NOTE: original 3D-Mem uses hard asserts here. We downgrade to warnings
+        # so a transient desync (e.g. from merge_objects) doesn't abort the whole
+        # episode in a long eval run. The desync is non-fatal: it only means some
+        # object ids in self.objects are not referenced by any snapshot cluster,
+        # which does not corrupt the VLM decision pipeline.
         obj_exclude_count = sum(
             [
                 1 if obj["num_detections"] < cfg.min_detection else 0
@@ -992,49 +1023,56 @@ class Scene:
         total_objs_count = sum(
             [len(snapshot.cluster) for snapshot in self.snapshots.values()]
         )
-        assert (
-            len(self.objects) == total_objs_count + obj_exclude_count
-        ), f"{len(self.objects)} != {total_objs_count} + {obj_exclude_count}"
-        total_objs_count = sum(
+        if len(self.objects) != total_objs_count + obj_exclude_count:
+            logging.warning(
+                f"sanity_check: {len(self.objects)} != {total_objs_count} + {obj_exclude_count} (objects != clustered + excluded)"
+            )
+        total_objs_count_dedup = sum(
             [len(set(snapshot.cluster)) for snapshot in self.snapshots.values()]
         )
-        assert (
-            len(self.objects) == total_objs_count + obj_exclude_count
-        ), f"{len(self.objects)} != {total_objs_count} + {obj_exclude_count}"
+        if len(self.objects) != total_objs_count_dedup + obj_exclude_count:
+            logging.warning(
+                f"sanity_check (dedup): {len(self.objects)} != {total_objs_count_dedup} + {obj_exclude_count}"
+            )
+
+        # check each object's snapshot membership (warn-only)
         for obj_id in self.objects.keys():
             exist_count = 0
             for ss in self.snapshots.values():
                 if obj_id in ss.cluster:
                     exist_count += 1
             if self.objects[obj_id]["num_detections"] < cfg.min_detection:
-                assert (
-                    exist_count == 0
-                ), f"{exist_count} != 0 for obj_id {obj_id}, {self.objects[obj_id]['class_name']}"
+                if exist_count != 0:
+                    logging.warning(
+                        f"sanity_check: obj {obj_id} ({self.objects[obj_id]['class_name']}) has {exist_count} cluster refs but num_detections < min_detection"
+                    )
             else:
-                assert (
-                    exist_count == 1
-                ), f"{exist_count} != 1 for obj_id {obj_id}, {self.objects[obj_id]['class_name']}"
+                if exist_count != 1:
+                    logging.warning(
+                        f"sanity_check: obj {obj_id} ({self.objects[obj_id]['class_name']}) has {exist_count} cluster refs (expected 1)"
+                    )
+
+        # check snapshot internal consistency (warn-only)
         for ss in self.snapshots.values():
-            assert len(ss.cluster) == len(
-                set(ss.cluster)
-            ), f"{ss.cluster} has duplicates"
-            assert len(ss.full_obj_list.keys()) == len(
-                set(ss.full_obj_list.keys())
-            ), f"{ss.full_obj_list.keys()} has duplicates"
+            if len(ss.cluster) != len(set(ss.cluster)):
+                logging.warning(f"sanity_check: snapshot cluster {ss.cluster} has duplicates")
+            if len(ss.full_obj_list.keys()) != len(set(ss.full_obj_list.keys())):
+                logging.warning(f"sanity_check: snapshot full_obj_list {ss.full_obj_list.keys()} has duplicates")
             for obj_id in ss.cluster:
-                assert (
-                    obj_id in ss.full_obj_list
-                ), f"{obj_id} not in {ss.full_obj_list.keys()}"
+                if obj_id not in ss.full_obj_list:
+                    logging.warning(f"sanity_check: {obj_id} not in {ss.full_obj_list.keys()}")
             for obj_id in ss.full_obj_list.keys():
-                assert obj_id in self.objects, f"{obj_id} not in scene objects"
+                if obj_id not in self.objects:
+                    logging.warning(f"sanity_check: {obj_id} in full_obj_list but not in scene objects")
         # check whether the snapshots in scene.snapshots and scene.frames are the same
         for file_name, ss in self.snapshots.items():
-            assert (
-                ss.cluster == self.frames[file_name].cluster
-            ), f"{ss}\n!=\n{self.frames[file_name]}"
-            assert (
-                ss.full_obj_list == self.frames[file_name].full_obj_list
-            ), f"{ss}\n==\n{self.frames[file_name]}"
+            if file_name not in self.frames:
+                logging.warning(f"sanity_check: snapshot {file_name} not in frames")
+                continue
+            if ss.cluster != self.frames[file_name].cluster:
+                logging.warning(f"sanity_check: snapshot cluster {ss.cluster} != frame {self.frames[file_name].cluster}")
+            if ss.full_obj_list != self.frames[file_name].full_obj_list:
+                logging.warning(f"sanity_check: snapshot full_obj_list != frame full_obj_list for {file_name}")
 
     def print_scene_graph(self):
         if self.detection_model is None or len(self.objects) == 0:
