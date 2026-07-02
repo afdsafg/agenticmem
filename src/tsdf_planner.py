@@ -1005,6 +1005,28 @@ class TSDFPlanner(TSDFPlannerBase):
 
         return island, unoccupied
 
+    def mask_true_point(self, viewpoints):
+        # ported from MSGNav tsdf_planner.py L806-815
+        true_views = []
+        for viewpoint in viewpoints:
+            pos = self.habitat2voxel(viewpoint)[:2]
+            H, W = self.unoccupied.shape
+            x, y = pos
+            x, y = int(x), int(y)
+            if x >= 0 and x < H and y >= 0 and y < W and self.unoccupied[x, y]:
+                true_views.append(viewpoint)
+        return np.array(true_views)
+
+    def get_near_true_point(self, viewpoints):
+        # ported from MSGNav tsdf_planner.py L817-824
+        true_views = []
+        for viewpoint in viewpoints:
+            pos = self.habitat2voxel(viewpoint)[:2]
+            next_point = get_nearest_true_point(pos, self.unoccupied)
+            next_point_normal = next_point * self._voxel_size + self._vol_origin[:2]
+            true_views.append(self.normal2habitat(next_point_normal))
+        return np.array(true_views)
+
     def get_frontier_region_map(self, frontier_coordinates):
         # frontier_coordinates: [N, 2] ndarray of the coordinates covered by the frontier in voxel space
         region_map = np.zeros_like(self.frontier_map, dtype=bool)

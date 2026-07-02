@@ -1,0 +1,84 @@
+# General
+seed: 77
+exp_name: "Pred-EQA-GOAT"
+output_parent_dir: "results"
+scene_dataset_config_path: "/.../Pred-EQA/data/hm3d_annotated_basis.scene_dataset_config.json"
+scene_data_path: "/path-to-your-hm3d-dataset/hm3d/"
+
+# GOAT-Bench data
+goat_data_path: "data/datasets/goat_bench/v1"
+split: val
+success_distance: 1.0
+clear_up_memory_every_subtask: false
+max_steps_per_subtask: 500
+
+# major settings
+choose_every_step: true
+egocentric_views: true
+
+# detection model (MSGNav-style detection stack, runs in parallel with VLM)
+yolo_model_name: yolov8x-world.pt
+sam_model_name: sam_l.pt
+class_set: scannet200
+min_detection: 1
+use_room_det: true
+
+# KSS / prefiltering
+top_k: 20
+prompt_img_size: [512, 512]  # [h, w] for KSS image encoding
+
+# VDD
+dicision_radius: 1.0
+
+# camera, image
+camera_height: 1.5
+camera_tilt_deg: -30
+img_width: 1280
+img_height: 1280
+hfov: 120
+
+# whether to save visualization (which is slow)
+save_visualization: true
+concept_graph_config_path: "/.../Pred-EQA/cfg/concept_graph_default.yaml"
+
+# the image size for prompting VLM
+prompt_h: 640
+prompt_w: 640
+
+# navigation
+num_step: 50
+init_clearance: 0.3
+extra_view_phase_1: 2
+extra_view_angle_deg_phase_1: 60
+extra_view_phase_2: 6
+extra_view_angle_deg_phase_2: 40
+
+# about tsdf, depth map, and frontier updates
+explored_depth: 1.7
+tsdf_grid_size: 0.1
+margin_w_ratio: 0.25
+margin_h_ratio: 0.6
+planner:
+  eps: 1
+  max_dist_from_cur_phase_1: 1
+  max_dist_from_cur_phase_2: 1
+  final_observe_distance: 0.75
+  surrounding_explored_radius: 0.7
+
+  # about frontier selection
+  frontier_edge_area_min: 4
+  frontier_edge_area_max: 6
+  frontier_area_min: 8
+  frontier_area_max: 9
+  min_frontier_area: 20
+  max_frontier_angle_range_deg: 150
+  region_equal_threshold: 0.95
+
+# about scene graph construction
+scene_graph:
+  confidence: 0.003
+  nms_threshold: 0.1
+  iou_threshold: 0.5
+  obj_include_dist: 3.5
+  target_obj_iou_threshold: 0.6
+  use_room_det: true

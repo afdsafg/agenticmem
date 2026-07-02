@@ -186,6 +186,16 @@ class Scene:
         self.frames = {}
         self.all_observations = {}
 
+    def reset_for_new_subtask(self):
+        """子任务切换：清 per-subtask 状态，保留 objects/edges/img_to_edge（跨子任务记忆）。"""
+        self.snapshots = {}
+        self.frames = {}
+        self.all_observations = {}
+        self.filtered_snapshots = set()
+        self.text_memory_system = SceneIntegration(self)
+        self.long_term_memory = self.text_memory_system.long_term_memory
+        # objects/edges/img_to_edge 保留 — 跨子任务场景图记忆
+
     def get_observation(self, pts, angle):
         agent_state = habitat_sim.AgentState()
         agent_state.position = pts
