@@ -28,10 +28,12 @@ def safe_strip(string):
     return string.strip()
 
 client = OpenAI(
-    api_key="local",
-    base_url="http://127.0.0.1:12221/v1",
+    api_key=os.environ.get("OPENAI_API_KEY", "local"),
+    base_url=os.environ.get("OPENAI_BASE_URL", "http://127.0.0.1:12221/v1"),
     timeout=3600
 )
+
+_VLM_MODEL = os.environ.get("MODEL_NAME", "Qwen2.5-VL-7B-Instruct")
 
 
 # encode tensor images to base64 format
@@ -72,7 +74,7 @@ def call_openai_api(sys_prompt, contents) -> Optional[str]:
     while retry_count < max_tries:
         try:
             completion = client.chat.completions.create(
-                model="Qwen2.5-VL-7B-Instruct",
+                model=_VLM_MODEL,
                 messages=message_text,
                 max_tokens=2048,
                 temperature=0.7,
@@ -103,7 +105,7 @@ def call_openai_api_text(sys_prompt, contents) -> Optional[str]:
     while retry_count < max_tries:
         try:
             completion = client.chat.completions.create(
-                model="Qwen2.5-VL-7B-Instruct",
+                model=_VLM_MODEL,
                 messages=message_text,
                 max_tokens=1024,
                 temperature=0.7,
