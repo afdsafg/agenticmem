@@ -249,11 +249,12 @@ def get_scene_path(scene_id: str, scene_data_path: str) -> str:
     if os.path.exists(direct):
         return direct
 
-    # The split dir (val/train) may not match actual layout — search both
+    # The split dir (val/train) may not match actual layout — search candidate prefixes
     parts = sid.lstrip("/").split("/", 1)
     if len(parts) == 2:
         scene_rel = parts[1].lstrip("/")  # e.g. "00877-4ok3usBNeis/4ok3usBNeis.basis.glb"
-        for split_name in ("train", "val"):
+        # Server layouts seen: {root}/train/{scene}/, {root}/val/{scene}/, {root}/train/val/{scene}/
+        for split_name in ("train/val", "train", "val"):
             candidate = os.path.join(scene_data_path, split_name, scene_rel)
             if os.path.exists(candidate):
                 return candidate
