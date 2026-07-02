@@ -4,8 +4,8 @@ exp_name: "Pred-EQA"
 output_parent_dir: "results"
 scene_dataset_config_path: "/.../Pred-EQA/data/hm3d_annotated_basis.scene_dataset_config.json"
 scene_data_path: "/path-to-your-hm3d-dataset/hm3d/"
-# questions_list_path: '/.../Pred-EQA/data/aeqa_questions-41.json'   # AEQA subset
-questions_list_path: '/.../Pred-EQA/data/aeqa_questions-184.json'   # AEQA 
+questions_list_path: '/.../Pred-EQA/data/aeqa_questions-41.json'   # AEQA subset
+# questions_list_path: '/.../Pred-EQA/data/aeqa_questions-184.json'   # AEQA
 # questions_list_path: '/.../Pred-EQA/data/express-bench.json'    # Express-Bench
 
 # major settings
