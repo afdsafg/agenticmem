@@ -301,7 +301,8 @@ class Scene:
                     image_rgb, depth, intrinsics, cam_pos, pts, img_path
                 )
             except Exception as e:
-                logging.warning(f"Detection stack failed (non-fatal, VLM path continues): {e}")
+                import traceback as _tb
+                logging.warning(f"Detection stack failed (non-fatal, VLM path continues): {e}\n{_tb.format_exc()}")
                 added_obj_ids = []
 
         # --- VLM path (always runs, untouched from original) ---
