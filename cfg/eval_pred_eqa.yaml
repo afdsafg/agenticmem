@@ -69,3 +69,4 @@ scene_graph:
   iou_threshold: 0.5
   obj_include_dist: 3.5
   target_obj_iou_threshold: 0.6
+  use_room_det: true

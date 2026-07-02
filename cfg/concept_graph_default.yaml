@@ -1,6 +1,8 @@
 bg_classes: ['wall', 'floor', 'ceiling', 'carpet', 'door', 'rug', 'bath mat']
 skip_bg: True
 
+edge_dist_threshold: 3.5
+
 object_detection_iou_threshold: 0.9
 min_mask_size_ratio: 0.001
 object_detection_confidence_threshold: 0.4

@@ -5,6 +5,8 @@ from src.conceptgraph.utils.general_utils import measure_time
 # from segment_anything import sam_model_registry, SamPredictor, SamAutomaticMaskGenerator
 import numpy as np
 import torch
+import torch.nn.functional as F
+import re
 from PIL import Image
 from scipy.spatial.distance import cosine
 
@@ -248,3 +250,60 @@ def compute_ft_vector_closeness_statistics(unbatched, batched):
     print(f"Mean Relative Difference: {np.mean(mrd)}")
     print(f"Mean Cosine Similarity: {np.mean(cosine_sim)}")
     print(f"Min Cosine Similarity: {np.min(cosine_sim)}")
+
+
+def clip_recognition(
+    clip_model, clip_tokenizer, clip_preprocess, image, prompt
+) -> np.ndarray:
+    image = Image.fromarray(image)
+    image = clip_preprocess(image).unsqueeze(0).to("cuda")
+    text = clip_tokenizer(prompt).to("cuda")
+    with torch.no_grad():
+        image_features = clip_model.encode_image(image)
+        text_features = clip_model.encode_text(text)
+        text_probs = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+    return text_probs.cpu()[0]
+
+
+def compute_clip_features_batched_check(
+    image_list,
+    clip_model,
+    clip_preprocess,
+    clip_tokenizer,
+    text_goal = None,
+    image_goal = None,
+    device="cuda",
+    extra_text = True
+):
+    preprocessed_images_batch = []
+    for img in image_list:
+        if (type(img) == np.ndarray):
+            img = Image.fromarray(img)
+        img = clip_preprocess(img).unsqueeze(0).to(device)
+        preprocessed_images_batch.append(img)
+    if image_goal is not None:
+        image_goal = Image.open(image_goal)
+        image_goal = clip_preprocess(image_goal).unsqueeze(0).to(device)
+        preprocessed_images_batch.append(image_goal)
+    elif extra_text:
+        def extract_quoted_question(text):
+            if "Could you" in text:
+                match = re.search(r"'(.*?)'", text)
+            else:
+                match = re.search(r"find the (.*?)\?", text)
+            return match.group(1) if match else None
+        text_goal = extract_quoted_question(text_goal)
+    preprocessed_images_batch = torch.cat(preprocessed_images_batch, dim=0).to(device)
+    with torch.no_grad():
+        image_features = clip_model.encode_image(preprocessed_images_batch)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+    if image_goal is not None:
+        similarity = F.cosine_similarity(image_features[:-1], image_features[-1:], dim=1)
+    else:
+        text_feat = clip_tokenizer(text_goal).to(device)
+        text_features = clip_model.encode_text(text_feat)
+        text_features /= text_features.norm(dim=-1, keepdim=True)
+        similarity = F.cosine_similarity(image_features, text_features, dim=1)
+
+    return similarity

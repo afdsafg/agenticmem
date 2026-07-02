@@ -27,7 +27,7 @@ from src.utils import rgba2rgb
 from src.tsdf_planner import SnapShot
 
 # Pure VLM imports
-from src.conceptgraph.slam.slam_classes import MapObjectDict
+from src.conceptgraph.slam.slam_classes import MapObjectDict, MapEdge
 
 # New text-based long-term memory and planning imports
 from src.scene_integration import SceneIntegration
@@ -124,6 +124,9 @@ class Scene:
                 class_set=cfg.class_set,
             )
             self.detection_model.set_classes(self.obj_classes.get_classes_arr())
+            self.rooms = ['bedroom', 'living room', 'bathroom', 'kitchen room', 'laundry room', 'others']
+            self.edges: Dict[tuple, Any] = {}
+            self.img_to_edge: Dict[str, list] = {}
             logging.info(f"Detection stack enabled: {len(self.obj_classes.get_classes_arr())} classes loaded")
 
         if os.path.exists(semantic_texture_path) and os.path.exists(
@@ -335,6 +338,25 @@ class Scene:
         obj_classes = self.obj_classes
         cfg_cg = self.cfg_cg
 
+        # 0. Room detection (CLIP-based)
+        use_room_det = self.cfg.get("use_room_det", False)
+        if use_room_det:
+            from src.conceptgraph.utils.model_utils import compute_clip_features_batched_check
+            sim = compute_clip_features_batched_check(
+                image_list=[image_rgb],
+                clip_model=self.clip_model.to("cuda"),
+                clip_tokenizer=self.clip_tokenizer,
+                clip_preprocess=self.clip_preprocess,
+                text_goal=np.array(self.rooms),
+                image_goal=None,
+                extra_text=False
+            ).detach().cpu().numpy()
+            room_label = self.rooms[np.argmax(sim)]
+            room_conf = np.max(sim).item()
+        else:
+            room_label = "unknown"
+            room_conf = 0.0
+
         # 1. YOLO detection
         results = self.detection_model.predict(image_rgb, conf=0.1, verbose=False)
         confidences = results[0].boxes.conf.cpu().numpy()
@@ -384,7 +406,7 @@ class Scene:
             "image_crops": image_crops, "image_feats": image_feats,
             "text_feats": text_feats,
             "detection_class_labels": detection_class_labels,
-            "room_label": "unknown", "room_conf": 0.0,
+            "room_label": room_label, "room_conf": room_conf,
         }
 
         # 5. resize + filter gobs
@@ -462,7 +484,61 @@ class Scene:
                 obj_classes=obj_classes,
             )
 
+        # 10. update scene graph edges (MapEdge co-occurrence)
+        try:
+            self.update_scene_graph_edges(added_obj_ids, img_path)
+        except Exception as e:
+            print(f"[detection] edge update failed: {e}")
+
         return added_obj_ids
+
+    def update_scene_graph_edges(self, frame_obj_ids, img_path: str):
+        """Build co-occurrence edges between objects in same frame. (From MSGNav)"""
+        self.img_to_edge[img_path] = []
+        for a_obj_id in frame_obj_ids:
+            for b_obj_id in frame_obj_ids:
+                if a_obj_id > b_obj_id:
+                    continue
+                obj1 = self.objects.get(a_obj_id)
+                obj2 = self.objects.get(b_obj_id)
+                if obj1 is None or obj2 is None:
+                    continue
+                if obj1["bbox"] is None or obj2["bbox"] is None:
+                    continue
+                obj1_center = obj1["bbox"].center[[0, 2]]
+                obj2_center = obj2["bbox"].center[[0, 2]]
+                if np.linalg.norm(obj1_center - obj2_center) > self.cfg_cg["edge_dist_threshold"]:
+                    continue
+                if (a_obj_id, b_obj_id) in self.edges:
+                    self.edges[(a_obj_id, b_obj_id)].rel_img.append(img_path)
+                    self.edges[(a_obj_id, b_obj_id)].num_detections += 1
+                    self.img_to_edge[img_path].append((a_obj_id, b_obj_id))
+                    if a_obj_id != b_obj_id:
+                        self.img_to_edge[img_path].append((b_obj_id, a_obj_id))
+                else:
+                    edge = MapEdge(obj1_idx=a_obj_id, obj2_idx=b_obj_id, rel_img=img_path, num_detections=1)
+                    self.edges[(a_obj_id, b_obj_id)] = edge
+                    self.img_to_edge[img_path].append((a_obj_id, b_obj_id))
+                    if a_obj_id != b_obj_id:
+                        self.edges[(b_obj_id, a_obj_id)] = edge
+                        self.img_to_edge[img_path].append((b_obj_id, a_obj_id))
+
+    def del_unused_scene_graph_edges(self):
+        """Remove edges referencing deleted objects. (From MSGNav)"""
+        valid_ids = set(self.objects.keys())
+        to_del = []
+        for (a, b) in list(self.edges.keys()):
+            if a not in valid_ids or b not in valid_ids:
+                to_del.append((a, b))
+        for k in to_del:
+            del self.edges[k]
+        for img_path in list(self.img_to_edge.keys()):
+            self.img_to_edge[img_path] = [
+                (a, b) for (a, b) in self.img_to_edge[img_path]
+                if a in valid_ids and b in valid_ids
+            ]
+            if len(self.img_to_edge[img_path]) == 0:
+                del self.img_to_edge[img_path]
 
     def filter_gobs_with_distance(self, pts, gobs):
         """Filter out objects too far from observation point. (From MSGNav)"""
